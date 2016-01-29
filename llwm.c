@@ -45,6 +45,15 @@ void die(const char *errstr, ...)
      exit(EXIT_FAILURE);
 }
 
+void debuglog(const char *fmt, ...)
+{
+     va_list ap;
+     
+     va_start(ap, fmt);
+     vfprintf(stdout, fmt, ap);
+     va_end(ap);
+}
+
 int triggersEqual(Trigger* a, Trigger* b)
 {
      if(a->type == b->type)
@@ -136,8 +145,11 @@ void triggerCallback(CallbackList* list, Trigger trigger, Window win)
      for(node = list->first; node != NULL; node = node->next)
 	  if(triggersEqual(&node->trigger, &trigger))
 	  {
+	       debuglog("triggering for: %d", node->trigger.type);
+	       
 	       lua_rawgeti(node->luaState, LUA_REGISTRYINDEX, node->cbRegIndex);
-	       lua_pcall(node->luaState, 0, 0, 0);
+	       lua_pushnumber(node->luaState, win); 
+	       lua_pcall(node->luaState, 1, 0, 0);
 	       break;
 	  }
 }
@@ -147,7 +159,7 @@ int xErrorHandler(Display* disp, XErrorEvent* err)
      char buff[512];
 
      XGetErrorText(disp, err->error_code, buff, 512);
-     printf("X error on request type %d: %s", err->request_code, buff);
+     debuglog("X error on request type %d: %s", err->request_code, buff);
      
      return 1;
 }
@@ -169,7 +181,7 @@ int bind(lua_State *luaState)
      char const* keyname = luaL_checkstring(luaState, 2);
      int keycode = XKeysymToKeycode(dpy, XStringToKeysym(keyname));
 
-     printf("Registering binding for %d+%s (%d)\n", mods, keyname, keycode);
+     debuglog("Registering binding for %d+%s (%d)\n", mods, keyname, keycode);
      
      XGrabKey(dpy, keycode, mods, root, True, GrabModeAsync, GrabModeAsync);
      
@@ -188,7 +200,7 @@ int unbind(lua_State *luaState)
      char const* keyname = luaL_checkstring(luaState, 2);
      int keycode = XKeysymToKeycode(dpy, XStringToKeysym(keyname));
      
-     printf("Unbinding %d+%s (%d)\n", mods, keyname, keycode);
+     debuglog("Unbinding %d+%s (%d)\n", mods, keyname, keycode);
      
      XUngrabKey(dpy, keycode, mods, root);
      
@@ -210,23 +222,40 @@ int unbindall(lua_State *luaState)
 
 int subs(lua_State* luaState)
 {
-     printf("Registering listener...\n");
+     debuglog("Registering listener...\n");
      
      Trigger trigger;
      trigger.type = luaL_checkinteger(luaState, 1);
-     
      addCallback(callbacks, luaState, luaL_ref(luaState, LUA_REGISTRYINDEX), trigger);
+
+     debuglog("For %d\n", trigger.type);
+     
      return 0;
 }
 
 int unsubs(lua_State* luaState)
 {
-     printf("Unregistering listener...\n");
+     debuglog("Unregistering listener...\n");
      
      Trigger trigger;
      trigger.type = luaL_checkinteger(luaState, 1);
      
      removeCallback(callbacks, trigger);
+     return 0;
+}
+
+int setWindowFrame(lua_State* luaState)
+{
+     int mods = luaL_checkinteger(luaState, 1);
+
+     debuglog("SetWindowFrame\n");
+     
+     XMoveResizeWindow(dpy, luaL_checkinteger(luaState, 1),
+		       luaL_checkinteger(luaState, 2),
+		       luaL_checkinteger(luaState, 3),
+		       luaL_checkinteger(luaState, 4),
+		       luaL_checkinteger(luaState, 5));
+     
      return 0;
 }
 
@@ -237,6 +266,7 @@ const struct luaL_Reg wmlib [] = {
      {"bind", bind},
      {"unbind", unbind},
      {"unbindall", unbindall},
+     {"setWindowFrame", setWindowFrame},
      {NULL, NULL}
 };
 
@@ -264,9 +294,9 @@ void reloadScript(lua_State* luaState)
      strcpy(&path[path[n - 1] == '/' ? (n - 1) : n], "/.config/llwm/script.lua");
      
      if(luaL_dofile(luaState, path))
-	  printf("%s\n", lua_tostring(luaState, -1));
+	  debuglog("%s\n", lua_tostring(luaState, -1));
      else
-	  printf("Script loaded successfully!\n");
+	  debuglog("Script loaded successfully!\n");
 }
 
 int main()
@@ -301,14 +331,14 @@ int main()
      initLuaAPI(luaState);
 
      reloadScript(luaState);
-
+     
      while(!quitFlag)
      {
 	  XNextEvent(dpy, &ev);
 	  Trigger trigger;
-	  trigger.type = KeyPress;
+	  trigger.type = ev.type;
 	  
-	  printf("Evt: %d, %d\n", ev.type, dap);
+	  debuglog("Evt: %d, %d\n", ev.type, dap);
 
 	  if(ev.type == KeyPress)
 	  {
