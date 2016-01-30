@@ -59,6 +59,38 @@ void setCallback(int* cb, lua_State* luaState)
      *cb = lua_type(luaState, 1) == LUA_TNIL ? -1 : luaL_ref(luaState, LUA_REGISTRYINDEX);
 }
 
+static int msghandler(lua_State *L) // Shamelessly stolen from the lua interpreter! :)
+{
+     const char *msg = lua_tostring(L, 1);
+     
+     if (msg == NULL)
+     {  /* is error object not a string? */
+	  if (luaL_callmeta(L, 1, "__tostring") &&  /* does it have a metamethod */
+	      lua_type(L, -1) == LUA_TSTRING)  /* that produces a string? */
+	       return 1;  /* that is the message */
+	  else
+	       msg = lua_pushfstring(L, "(error object is a %s value)",
+				     luaL_typename(L, 1));
+     }
+     
+     luaL_traceback(L, L, msg, 1);  /* append a standard traceback */
+     
+     return 1;  /* return the traceback */
+}
+
+static int docall(lua_State *L, int narg, int nres) // Shamelessly stolen from the lua interpreter! :)
+{
+     int status;
+     int base = lua_gettop(L) - narg;  /* function index */
+     
+     lua_pushcfunction(L, msghandler);  /* push message handler */
+     lua_insert(L, base);  /* put it under function and args */
+     status = lua_pcall(L, narg, nres, base);
+     lua_remove(L, base);  /* remove message handler from the stack */
+     
+     return status;
+}
+
 int wmQuit(lua_State* luaState)
 {
      quitFlag = 1;
@@ -255,8 +287,8 @@ int main()
 	       if(windowCreatedCb >= 0)
 	       {
 		    lua_rawgeti(luaState, LUA_REGISTRYINDEX, windowCreatedCb);
-		    lua_pushnumber(luaState, ev.xcreatewindow.window);	       
-		    if(lua_pcall(luaState, 1, 0, 0))
+		    lua_pushnumber(luaState, ev.xcreatewindow.window);
+		    if(docall(luaState, 1, 0))
 			 printf("%s\n", lua_tostring(luaState, -1));
 	       }
 	       break;
