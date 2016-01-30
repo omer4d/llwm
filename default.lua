@@ -104,7 +104,7 @@ cmdTree:addCmd({{64, "q"}}, function()
 end)
 
 cmdTree:addCmd({{64, "t"}}, function()
-      os.execute("urxvt")
+      os.execute("urxvt &")
 end)
 
 cmdTree:addCmd({{64, "x"}, {0, "r"}}, function()
@@ -137,6 +137,15 @@ wm.onKeyUp(function (win, mods, key)
 	 wm.releaseKeyboard()
 	 scheduledKbRelease = false
       end
+end)
+
+wm.onWindowCreated(function (win)
+      print("Created window " .. win)
+      wm.setWindowFrame(win, 0, 0, 500, 500)
+end)
+
+wm.onWindowDestroyed(function (win)
+      print("Destroyed window " .. win)
 end)
 
 print("Success!")

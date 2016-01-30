@@ -159,6 +159,7 @@ const struct luaL_Reg wmlib [] = {
      {"onKeyUp", wmOnKeyUp},
      {"onWindowCreated", wmOnWindowCreated},
      {"onWindowDestroyed", wmOnWindowDestroyed},
+     {"setWindowFrame", wmSetWindowFrame},
      {NULL, NULL}
 };
 
@@ -198,12 +199,12 @@ int main()
      XSetWindowAttributes setAttribs;
      XEvent ev;
   
-     if(!(dpy = XOpenDisplay(":0")))
+     if(!(dpy = XOpenDisplay(":1")))
 	  die("Failed top open display.");
      
      XSetErrorHandler(xErrorHandler);
      root = XDefaultRootWindow(dpy);
-     setAttribs.event_mask = SubstructureNotifyMask;// | SubstructureRedirectMask;
+     setAttribs.event_mask = SubstructureNotifyMask | SubstructureRedirectMask;
      XChangeWindowAttributes(dpy, root, CWEventMask, &setAttribs);
      XkbSetDetectableAutoRepeat(dpy, True, None);
      XSync(dpy, True);
@@ -219,28 +220,61 @@ int main()
 	  XNextEvent(dpy, &ev);
 	  
 	  //debuglog("Evt: %d\n", ev.type);
-	  
-	  if(ev.type == KeyPress && keyDownCb >= 0)
-	  {
-	       lua_rawgeti(luaState, LUA_REGISTRYINDEX, keyDownCb);
-	       lua_pushnumber(luaState, ev.xany.window);
-	       lua_pushnumber(luaState, ev.xkey.state);
-	       lua_pushstring(luaState, XKeysymToString(XkbKeycodeToKeysym(dpy, ev.xkey.keycode, 0, 0)));	       
-	       if(lua_pcall(luaState, 3, 0, 0))
-		    printf("%s\n", lua_tostring(luaState, -1));
-	  }
 
-	  else if(ev.type == KeyRelease && keyUpCb >= 0)
+	  switch(ev.type)
 	  {
-	       lua_rawgeti(luaState, LUA_REGISTRYINDEX, keyUpCb);
-	       lua_pushnumber(luaState, ev.xany.window);
-	       lua_pushnumber(luaState, ev.xkey.state);
-	       lua_pushstring(luaState, XKeysymToString(XkbKeycodeToKeysym(dpy, ev.xkey.keycode, 0, 0)));	       
-	       if(lua_pcall(luaState, 3, 0, 0))
-		    printf("%s\n", lua_tostring(luaState, -1));
+	  case MapRequest:
+	       XMapWindow(dpy, ev.xmaprequest.window);
+	       break;
+	       
+	  case KeyPress:
+	       if(keyDownCb >= 0)
+	       {
+		    lua_rawgeti(luaState, LUA_REGISTRYINDEX, keyDownCb);
+		    lua_pushnumber(luaState, ev.xany.window);
+		    lua_pushnumber(luaState, ev.xkey.state);
+		    lua_pushstring(luaState, XKeysymToString(XkbKeycodeToKeysym(dpy, ev.xkey.keycode, 0, 0)));	       
+		    if(lua_pcall(luaState, 3, 0, 0))
+			 printf("%s\n", lua_tostring(luaState, -1));
+	       }
+	       break;
+
+	  case KeyRelease:
+	       if(keyUpCb >= 0)
+	       {
+		    lua_rawgeti(luaState, LUA_REGISTRYINDEX, keyUpCb);
+		    lua_pushnumber(luaState, ev.xany.window);
+		    lua_pushnumber(luaState, ev.xkey.state);
+		    lua_pushstring(luaState, XKeysymToString(XkbKeycodeToKeysym(dpy, ev.xkey.keycode, 0, 0)));	       
+		    if(lua_pcall(luaState, 3, 0, 0))
+			 printf("%s\n", lua_tostring(luaState, -1));
+	       }
+	       break;
+	       
+	  case CreateNotify:
+	       if(windowCreatedCb >= 0)
+	       {
+		    lua_rawgeti(luaState, LUA_REGISTRYINDEX, windowCreatedCb);
+		    lua_pushnumber(luaState, ev.xcreatewindow.window);	       
+		    if(lua_pcall(luaState, 1, 0, 0))
+			 printf("%s\n", lua_tostring(luaState, -1));
+	       }
+	       break;
+
+	  case DestroyNotify:
+	       if(windowDestroyedCb >= 0)
+	       {
+		    lua_rawgeti(luaState, LUA_REGISTRYINDEX, windowDestroyedCb);
+		    lua_pushnumber(luaState, ev.xdestroywindow.window);	       
+		    if(lua_pcall(luaState, 1, 0, 0))
+			 printf("%s\n", lua_tostring(luaState, -1));
+	       }
+	       break;
+	  default:
+	       break;
 	  }
      }
-
+     
      cleanupX();
      lua_close(luaState);
      
