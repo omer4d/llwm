@@ -4,6 +4,7 @@
 #include <locale.h>
 #include <malloc.h>
 #include <string.h>
+#include <signal.h>
 
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
@@ -12,28 +13,6 @@
 #include <lua.h>
 #include <lauxlib.h>
 #include <lualib.h>
-
-typedef struct {
-     int type;
-     int mods;
-     int keycode;
-}KeyTrigger;
-
-typedef union {
-     int type;
-     KeyTrigger key;
-}Trigger;
-
-typedef struct CallbackNode_t {
-     struct CallbackNode_t* next;
-     lua_State* luaState;
-     int cbRegIndex;
-     Trigger trigger;
-}CallbackNode;
-
-typedef struct {
-     CallbackNode* first;
-}CallbackList;
 
 void die(const char *errstr, ...)
 {
@@ -54,106 +33,6 @@ void debuglog(const char *fmt, ...)
      va_end(ap);
 }
 
-int triggersEqual(Trigger* a, Trigger* b)
-{
-     if(a->type == b->type)
-     {
-	  switch(a->type)
-	  {
-	  case KeyPress:
-	       return a->key.mods == b->key.mods && a->key.keycode == b->key.keycode;
-	  default:
-	       return 1;
-	  }
-     }
-
-     return 0;
-}
-
-CallbackNode* createCallbackNode(CallbackNode* next, lua_State* luaState, int cbRegIndex, Trigger trigger)
-{
-     CallbackNode* node = (CallbackNode*)malloc(sizeof(CallbackNode));
-     node->next = next;
-     node->luaState = luaState;
-     node->cbRegIndex = cbRegIndex;
-     node->trigger = trigger;
-     return node;
-}
-
-void destroyCallbackNode(CallbackNode* node)
-{
-     luaL_unref(node->luaState, LUA_REGISTRYINDEX, node->cbRegIndex);
-     free(node);
-}
-
-CallbackList* createCallbackList()
-{
-     CallbackList* list = (CallbackList*)malloc(sizeof(CallbackList));
-     list->first = NULL;
-     return list;
-}
-
-void destroyCallbackList(CallbackList* list)
-{
-     CallbackNode* node = list->first;
-     
-     while(node != NULL)
-     {
-	  CallbackNode* tmp = node->next;
-	  destroyCallbackNode(node);
-	  node = tmp;
-     }
-
-     free(list);
-}
-
-void removeCallback(CallbackList* list, Trigger trigger)
-{
-     if(list->first != NULL)
-     {
-	  if(triggersEqual(&list->first->trigger, &trigger))
-	  {
-	       CallbackNode* n = list->first;
-	       list->first = n->next;
-	       destroyCallbackNode(n);
-	  }
-	  
-	  else
-	  {
-	       CallbackNode *prev, *n;
-	       for(prev = list->first, n = list->first->next; n != NULL; prev = n, n = n->next)
-		    if(triggersEqual(&n->trigger, &trigger))
-		    {
-			 prev->next = n->next;
-			 destroyCallbackNode(n);
-			 break;
-		    }
-	  }
-     }
-}
-
-void addCallback(CallbackList* list, lua_State* luaState, int regIndex, Trigger trigger)
-{
-     removeCallback(list, trigger);
-     list->first = createCallbackNode(list->first, luaState, regIndex, trigger);
-}
-
-void triggerCallback(CallbackList* list, Trigger trigger, Window win)
-{
-     CallbackNode* node;
-
-     for(node = list->first; node != NULL; node = node->next)
-	  if(triggersEqual(&node->trigger, &trigger))
-	  {
-	       debuglog("triggering for: %d", node->trigger.type);
-	       
-	       lua_rawgeti(node->luaState, LUA_REGISTRYINDEX, node->cbRegIndex);
-	       lua_pushnumber(node->luaState, win); 
-	       lua_pcall(node->luaState, 1, 0, 0);
-	       break;
-	  }
-}
-
 int xErrorHandler(Display* disp, XErrorEvent* err)
 {
      char buff[512];
@@ -164,91 +43,101 @@ int xErrorHandler(Display* disp, XErrorEvent* err)
      return 1;
 }
 
+int keyDownCb = -1;
+int keyUpCb = -1;
+int windowCreatedCb = -1;
+int windowDestroyedCb = -1;
+
 Display* dpy;
 Window root;
-CallbackList* callbacks = NULL;
 int quitFlag = 0;
 
-int quit(lua_State* luaState)
+void setCallback(int* cb, lua_State* luaState)
+{
+     if(*cb >= 0)
+	  luaL_unref(luaState, LUA_REGISTRYINDEX, *cb);
+     *cb = lua_type(luaState, 1) == LUA_TNIL ? -1 : luaL_ref(luaState, LUA_REGISTRYINDEX);
+}
+
+int wmQuit(lua_State* luaState)
 {
      quitFlag = 1;
      return 0;
 }
 
-int bind(lua_State *luaState)
+int wmGrabKey(lua_State* luaState)
 {
      int mods = luaL_checkinteger(luaState, 1);
      char const* keyname = luaL_checkstring(luaState, 2);
      int keycode = XKeysymToKeycode(dpy, XStringToKeysym(keyname));
-
-     debuglog("Registering binding for %d+%s (%d)\n", mods, keyname, keycode);
+     
+     debuglog("Grabbing %d+%s (%d)\n", mods, keyname, keycode);
      
      XGrabKey(dpy, keycode, mods, root, True, GrabModeAsync, GrabModeAsync);
      
-     Trigger trigger;
-     trigger.type = KeyPress;
-     trigger.key.mods = mods;
-     trigger.key.keycode = keycode;
-     
-     addCallback(callbacks, luaState, luaL_ref(luaState, LUA_REGISTRYINDEX), trigger);
      return 0;
 }
 
-int unbind(lua_State *luaState)
+int wmReleaseKey(lua_State* luaState)
 {
      int mods = luaL_checkinteger(luaState, 1);
      char const* keyname = luaL_checkstring(luaState, 2);
      int keycode = XKeysymToKeycode(dpy, XStringToKeysym(keyname));
      
-     debuglog("Unbinding %d+%s (%d)\n", mods, keyname, keycode);
+     debuglog("Releasing %d+%s (%d)\n", mods, keyname, keycode);
      
      XUngrabKey(dpy, keycode, mods, root);
-     
-     Trigger trigger;
-     trigger.type = KeyPress;
-     trigger.key.mods = mods;
-     trigger.key.keycode = keycode;
-     
-     removeCallback(callbacks, trigger);
+
      return 0;
 }
 
-int unbindall(lua_State *luaState)
+int wmReleaseAllKeys(lua_State *luaState)
 {
      XUngrabKey(dpy, AnyKey, AnyModifier, root);
      XSync(dpy, False);
      return 0;
 }
 
-int subs(lua_State* luaState)
-{
-     debuglog("Registering listener...\n");
-     
-     Trigger trigger;
-     trigger.type = luaL_checkinteger(luaState, 1);
-     addCallback(callbacks, luaState, luaL_ref(luaState, LUA_REGISTRYINDEX), trigger);
-
-     debuglog("For %d\n", trigger.type);
-     
+int wmGrabKeyboard(lua_State* luaState)
+{     
+     XGrabKeyboard(dpy, root, True, GrabModeAsync, GrabModeAsync, CurrentTime);    
      return 0;
 }
 
-int unsubs(lua_State* luaState)
+int wmReleaseKeyboard(lua_State* luaState)
 {
-     debuglog("Unregistering listener...\n");
-     
-     Trigger trigger;
-     trigger.type = luaL_checkinteger(luaState, 1);
-     
-     removeCallback(callbacks, trigger);
+     XUngrabKeyboard(dpy, CurrentTime);
      return 0;
 }
 
-int setWindowFrame(lua_State* luaState)
+
+int wmOnKeyDown(lua_State* luaState)
+{
+     setCallback(&keyDownCb, luaState);
+     return 0;
+}
+
+int wmOnKeyUp(lua_State* luaState)
+{
+     setCallback(&keyUpCb, luaState);
+     return 0;
+}
+
+int wmOnWindowCreated(lua_State* luaState)
+{
+     setCallback(&windowCreatedCb, luaState);
+     return 0;
+}
+
+int wmOnWindowDestroyed(lua_State* luaState)
+{
+     setCallback(&windowDestroyedCb, luaState);
+     return 0;
+}
+
+int wmSetWindowFrame(lua_State* luaState)
 {
      int mods = luaL_checkinteger(luaState, 1);
-
-     debuglog("SetWindowFrame\n");
      
      XMoveResizeWindow(dpy, luaL_checkinteger(luaState, 1),
 		       luaL_checkinteger(luaState, 2),
@@ -260,22 +149,18 @@ int setWindowFrame(lua_State* luaState)
 }
 
 const struct luaL_Reg wmlib [] = {
-     {"quit", quit},
-     {"subs", subs},
-     {"unsubs", unsubs},
-     {"bind", bind},
-     {"unbind", unbind},
-     {"unbindall", unbindall},
-     {"setWindowFrame", setWindowFrame},
+     {"quit", wmQuit},
+     {"grabKey", wmGrabKey},
+     {"releaseKey", wmReleaseKey},
+     {"releaseAllKeys", wmReleaseAllKeys},
+     {"grabKeyboard", wmGrabKeyboard},
+     {"releaseKeyboard", wmReleaseKeyboard},
+     {"onKeyDown", wmOnKeyDown},
+     {"onKeyUp", wmOnKeyUp},
+     {"onWindowCreated", wmOnWindowCreated},
+     {"onWindowDestroyed", wmOnWindowDestroyed},
      {NULL, NULL}
 };
-
-void pushFunc(lua_State* luaState, char const* key, lua_CFunction func)
-{
-     lua_pushstring(luaState, key);
-     lua_pushcfunction(luaState, func);
-     lua_settable(luaState, -3);
-}
 
 void initLuaAPI(lua_State* luaState)
 {
@@ -286,104 +171,77 @@ void initLuaAPI(lua_State* luaState)
 
 void reloadScript(lua_State* luaState)
 {
+     /*
      char path[512];
      int n;
      
      strcpy(path, getenv("HOME"));
      n = strlen(path);
-     strcpy(&path[path[n - 1] == '/' ? (n - 1) : n], "/.config/llwm/script.lua");
+     strcpy(&path[path[n - 1] == '/' ? (n - 1) : n], "/.config/llwm/script.lua");*/
+
+     char const* path = "default.lua";
      
      if(luaL_dofile(luaState, path))
-	  debuglog("%s\n", lua_tostring(luaState, -1));
+	  printf("%s\n", lua_tostring(luaState, -1));
      else
-	  debuglog("Script loaded successfully!\n");
+	  printf("Script loaded successfully!\n");
+}
+
+void cleanupX()
+{
+     XUngrabKey(dpy, AnyKey, AnyModifier, root);
+     XSync(dpy, False);
 }
 
 int main()
 {
-     int keystate[256];
      XSetWindowAttributes setAttribs;
      XEvent ev;
-     Bool dap = False;
-     
-     callbacks = createCallbackList();
-     
-     //XWindowAttributes attr;
-     //XButtonEvent start;
-
   
      if(!(dpy = XOpenDisplay(":0")))
 	  die("Failed top open display.");
-
-     int i;
-     for(i = 0; i < 256; ++i)
-	  keystate[i] = 0;
-
+     
      XSetErrorHandler(xErrorHandler);
      root = XDefaultRootWindow(dpy);
-     setAttribs.event_mask = SubstructureNotifyMask;
+     setAttribs.event_mask = SubstructureNotifyMask;// | SubstructureRedirectMask;
      XChangeWindowAttributes(dpy, root, CWEventMask, &setAttribs);
-     XkbSetDetectableAutoRepeat(dpy, True, &dap);
+     XkbSetDetectableAutoRepeat(dpy, True, None);
      XSync(dpy, True);
      
      lua_State *luaState = luaL_newstate();
      luaL_openlibs(luaState);
      initLuaAPI(luaState);
-
+     
      reloadScript(luaState);
      
      while(!quitFlag)
      {
 	  XNextEvent(dpy, &ev);
-	  Trigger trigger;
-	  trigger.type = ev.type;
 	  
-	  debuglog("Evt: %d, %d\n", ev.type, dap);
-
-	  if(ev.type == KeyPress)
-	  {
-	       if(!keystate[ev.xkey.keycode])
-	       {
-		    keystate[ev.xkey.keycode] = 1;
-		    trigger.key.keycode = ev.xkey.keycode;
-		    trigger.key.mods = ev.xkey.state;
-		    triggerCallback(callbacks, trigger, ev.xany.window);
-	       }
-	  }
-
-	  else if(ev.type == KeyRelease)
-	  {
-	       keystate[ev.xkey.keycode] = 0;
-	  }
-
-	  else
-	       triggerCallback(callbacks, trigger, ev.xany.window);
+	  //debuglog("Evt: %d\n", ev.type);
 	  
-	  /*
-	  if(ev.type == KeyPress && ev.xkey.subwindow != None)
-	       XRaiseWindow(dpy, ev.xkey.subwindow);
-	  else if(ev.type == ButtonPress && ev.xbutton.subwindow != None)
+	  if(ev.type == KeyPress && keyDownCb >= 0)
 	  {
-	       XGetWindowAttributes(dpy, ev.xbutton.subwindow, &attr);
-	       start = ev.xbutton;
+	       lua_rawgeti(luaState, LUA_REGISTRYINDEX, keyDownCb);
+	       lua_pushnumber(luaState, ev.xany.window);
+	       lua_pushnumber(luaState, ev.xkey.state);
+	       lua_pushstring(luaState, XKeysymToString(XkbKeycodeToKeysym(dpy, ev.xkey.keycode, 0, 0)));	       
+	       if(lua_pcall(luaState, 3, 0, 0))
+		    printf("%s\n", lua_tostring(luaState, -1));
 	  }
-	  else if(ev.type == MotionNotify && start.subwindow != None)
+
+	  else if(ev.type == KeyRelease && keyUpCb >= 0)
 	  {
-	       int xdiff = ev.xbutton.x_root - start.x_root;
-	       int ydiff = ev.xbutton.y_root - start.y_root;
-	       XMoveResizeWindow(dpy, start.subwindow,
-				 attr.x + (start.button==1 ? xdiff : 0),
-				 attr.y + (start.button==1 ? ydiff : 0),
-				 MAX(1, attr.width + (start.button==3 ? xdiff : 0)),
-				 MAX(1, attr.height + (start.button==3 ? ydiff : 0)));
+	       lua_rawgeti(luaState, LUA_REGISTRYINDEX, keyUpCb);
+	       lua_pushnumber(luaState, ev.xany.window);
+	       lua_pushnumber(luaState, ev.xkey.state);
+	       lua_pushstring(luaState, XKeysymToString(XkbKeycodeToKeysym(dpy, ev.xkey.keycode, 0, 0)));	       
+	       if(lua_pcall(luaState, 3, 0, 0))
+		    printf("%s\n", lua_tostring(luaState, -1));
 	  }
-	  else if(ev.type == ButtonRelease)
-	  start.subwindow = None;*/
      }
 
-     XUngrabKey(dpy, AnyKey, AnyModifier, root);
-     XSync(dpy, False);
-     destroyCallbackList(callbacks);
+     cleanupX();
      lua_close(luaState);
      
      return 0;

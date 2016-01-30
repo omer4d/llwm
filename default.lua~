@@ -1,0 +1,34 @@
+print("Loading script...")
+
+keyPressed = {}
+
+wm.grabKey(64, "q")
+wm.grabKey(64, "t")
+wm.grabKey(64, "g")
+
+wm.onKeyDown(function (win, mods, key)
+      keyPressed[key] = true;
+
+      print(key .. mods .. " down")
+      
+      if key == "q" then
+	 wm.quit()
+      end
+
+      if key == "t" then
+	 print("Grabbing keyboard...")
+	 wm.grabKeyboard()
+      end
+
+      if key == "g" then
+	 print("Releasing keyboard...")
+	 wm.releaseKeyboard()
+      end
+end)
+
+wm.onKeyUp(function (win, mods, key)
+      keyPressed[key] = nil;
+      print(key .. mods .. " up")
+end)
+
+print("Success!")
